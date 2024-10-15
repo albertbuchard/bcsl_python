@@ -48,4 +48,4 @@ print("Final DAG:", dag)
 ```
 
 ## Reference
-G. Xiang, H. Wang, K. Yu, X. Guo, F. Cao and Y. Song, "Bootstrap-Based Layerwise Refining for Causal Structure Learning," in IEEE Transactions on Artificial Intelligence, vol. 5, no. 6, pp. 2708-2722, June 2024, doi: 10.1109/TAI.2023.3329786.
+Xianjie Guo, Yujie Wang, Xiaoling Huang, Shuai Yang, and Kui Yu. 2022. Bootstrap-based Causal Structure Learning. In Proceedings of the 31st ACM International Conference on Information & Knowledge Management (CIKM '22). Association for Computing Machinery, New York, NY, USA, 656–665. https://doi.org/10.1145/3511808.3557249
