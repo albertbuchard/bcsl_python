@@ -1,35 +1,70 @@
-from itertools import combinations
-
 import numpy as np
 import pandas as pd
-from scipy.stats import chi2_contingency, pearsonr
+from causallearn.graph.Endpoint import Endpoint
+from causallearn.search.ConstraintBased.FCI import (
+    reorientAllWith,
+    rule0,
+    removeByPossibleDsep,
+    rulesR1R2cycle,
+    ruleR3,
+    ruleR4B,
+    get_color_edges,
+)
+from causallearn.utils.PCUtils.BackgroundKnowledge import BackgroundKnowledge
+from causallearn.utils.cit import CIT
 from tqdm import tqdm
 
+from bcsl.graph_utils import get_undirected_graph_from_skeleton
 from bcsl.hill_climber import HillClimber
+from bcsl.hiton import Hiton
 from bcsl.scores.bdeu import BDeuScore
 from bcsl.scores.gaussian_bic import GaussianBICScore
 
 
 class BCSL:
-    def __init__(self, data, num_bootstrap_samples=100, max_k=3, is_discrete=False, use_causal_learn=True):
+    def __init__(
+        self,
+        data,
+        num_bootstrap_samples=100,
+        max_k=3,
+        is_discrete=False,
+        orientation_method="hill_climbing",
+        conditional_independence_method="fisherz",
+        verbose=False,
+    ):
         """
         Initialize the BCSL algorithm.
         :param data: The dataset to be used (n x m), where n is samples and m is variables.
         :param num_bootstrap_samples: Number of bootstrap samples for integrated learning.
         :param max_k: Maximum number of variables to condition on in independence tests.
         :param is_discrete: Whether the data is discrete or continuous.
-        :param use_causal_learn: Whether to use causal-learn for conditional independence tests and scoring.
+        :param orientation_method: The method to use for edge orientation (hill_climbing or fci).
+        :param conditional_independence_method: The method to use for conditional independence tests from causal-learn.
+        :param verbose: Whether to print verbose output.
         """
         if isinstance(data, pd.DataFrame):
+            self.node_names = list(data.columns)
             data = data.values
+        else:
+            self.node_names = [f"X{i}" for i in range(data.shape[1])]
         self.data = data
         self.num_bootstrap_samples = num_bootstrap_samples
-        self.use_causal_learn = use_causal_learn
+        self.conditional_independence_method = conditional_independence_method
         self.local_skeletons = None
         self.global_skeleton = None
+        self.sepsets = {}
         self.dag = None
         self.max_k = max_k
         self.is_discrete = is_discrete
+        self.orientation_method = orientation_method
+        self.verbose = verbose
+
+        self.hiton = Hiton(
+            self.data,
+            conditional_independence_test=self.conditional_independence_test,
+            max_k=max_k,
+            verbose=verbose,
+        )
 
     def conditional_independence_test(self, X, Y, Z=[]):
         """
@@ -41,112 +76,17 @@ class BCSL:
         :return: p-value from the conditional independence test.
         """
         if self.is_discrete:
-            if len(Z) > 0:
-                raise ValueError("Conditional independence test for discrete data does not support conditioning.")
-            # Use chi-squared test for discrete data
-            observed = np.histogram2d(self.data[:, X], self.data[:, Y], bins=2)[0]
-            chi2, p_value, _, _ = chi2_contingency(observed)
-            return p_value
+            cit_obj = CIT(
+                self.data,
+                method="chisq",
+            )
         else:
-            # Use partial correlation for continuous data
-            if len(Z) == 0:
-                # Pearson correlation if no conditioning
-                _, p_value = pearsonr(self.data[:, X], self.data[:, Y])
-                return p_value
-            elif self.use_causal_learn:
-                from causallearn.utils.cit import CIT
-                kci_obj = CIT(self.data, "kci")
-                p_value = kci_obj(X, Y, Z)
-                return p_value
-            else:
-                # Perform partial correlation test (using the external method for simplicity)
-                raise ValueError("Partial correlation test not implemented for continuous data.")
-
-    def hiton(self, target_var, alpha=0.05, spouses=True):
-        """
-        HITON algorithm to find the Markov Blanket (MB) set for a target variable.
-        This combines HITON-PC for the Parents and Children and the Spouse discovery.
-        :param target_var: The target variable index.
-        :param alpha: Significance level for the conditional independence test.
-        :param spouses: Whether to discover spouses (default: True).
-        :return: The MB set (indices of variables in the Markov Blanket), skeleton, sepset, and ci_count.
-        """
-        n_vars = self.data.shape[1]
-        candidate_set = list(range(n_vars))
-        candidate_set.remove(target_var)  # Remove the target itself
-        ci_count = 0  # Counter for the number of conditional independence tests
-        sepset = [[] for _ in range(n_vars)]  # Separating sets
-
-        # Step 1: HITON-PC (Parents and Children discovery)
-        variDepSet = []
-        for var in candidate_set:
-            p_value = self.conditional_independence_test(target_var, var)
-            ci_count += 1
-            if p_value < alpha:  # Dependent variables
-                variDepSet.append([var, p_value])
-
-        # Sort candidate variables by dependency (smaller p-value means stronger dependency)
-        variDepSet = sorted(variDepSet, key=lambda x: x[1])
-        candidate_PC = [var[0] for var in variDepSet]  # Candidate PC set
-
-        # Shrink phase: Test conditional independence with subsets of other variables in the PC set
-        pc_set = candidate_PC[:]
-        for x in candidate_PC:
-            conditions_Set = [i for i in pc_set if i != x]
-
-            # Limit the size of conditional sets based on max_k
-            for k in range(min(self.max_k, len(conditions_Set)) + 1):
-                if x not in pc_set:
-                    break
-                for subset in combinations(conditions_Set, k):
-                    p_value = self.conditional_independence_test(target_var, x, list(subset))
-                    ci_count += 1
-                    if p_value >= alpha:  # If conditionally independent
-                        sepset[x] = list(subset)  # Store the separating set
-                        pc_set.remove(x)
-                        break
-
-        currentMB = pc_set.copy()
-        current_skeleton = self.get_all_edges_from(target_var, currentMB)
-        direct_neighbors = currentMB.copy()
-
-        # Step 2: Spouse Discovery
-        if spouses:
-            for x in pc_set:
-                PCofPC, _, _, ci_num2 = self.hiton(x, alpha,
-                                                spouses=False)  # Find PC of each PC variable (Spouse discovery)
-                ci_count += ci_num2
-
-                for y in PCofPC:
-                    if y != target_var and y not in direct_neighbors:
-                        # Add conditioning on x (spouse candidate) for the target variable
-                        conditions_Set = sepset[y] + [x]
-                        conditions_Set = list(set(conditions_Set))  # Avoid duplicates
-                        pval = self.conditional_independence_test(target_var, y, conditions_Set)
-                        ci_count += 1
-                        if pval <= alpha:
-                            currentMB.append(y)  # Add spouse to the Markov Blanket
-                            # X is a collider Target -> X <- Y
-                            current_skeleton.append((y, x))  # Add edge from x to y
-                            # Orient the edge from Target to X
-                            # current_skeleton.remove((target_var, y))
-                            # current_skeleton.remove((y, target_var))
-                            # current_skeleton.add((target_var, y, "o")) or something
-
-        return list(set(currentMB)), set(current_skeleton), sepset, ci_count
-
-    def get_all_edges_from(self, target_var, to_set):
-        """
-        Get all edges from the target variable to the variables in the given set.
-        :param target_var: The target variable index.
-        :param to_set: set for  the direct neighbors of the target variable.
-        :return: List of edges from the target variable to the variables in to_set.
-        """
-        edges = []
-        for var in to_set:
-            if var != target_var:
-                edges.append((target_var, var))
-        return edges
+            cit_obj = CIT(
+                self.data,
+                method=self.conditional_independence_method,
+            )
+        p_value = cit_obj(X, Y, Z)
+        return p_value
 
     def learn_local_skeleton(self, directed=False):
         """
@@ -154,16 +94,50 @@ class BCSL:
         """
         n_vars = self.data.shape[1]
         local_skeletons = []
+        if self.sepsets is None:
+            self.sepsets = {}
 
-        for i in range(n_vars):
-            mb_set, skeleton, sepset, _ = self.hiton(i)  # Find the Markov Blanket set for variable i
+        if self.verbose:
+            loop_range = tqdm(range(n_vars), desc="Local Skeletons")
+        else:
+            loop_range = range(n_vars)
+        for i in loop_range:
+            mb_set, skeleton, sepsets, _ = self.hiton(
+                i
+            )  # Find the Markov Blanket set for variable i
             local_skeletons.append(skeleton)
+            self.merge_sepsets(sepsets)
 
         if not directed:
-            local_skeletons = [set(self.make_edges_undirected(edges)) for edges in local_skeletons]
+            local_skeletons = [
+                set(self.make_edges_undirected(edges)) for edges in local_skeletons
+            ]
 
         self.local_skeletons = local_skeletons
         return self.local_skeletons
+
+    def merge_sepsets(self, sepsets):
+        """
+        Merge the sepsets from each variable into a global sepset dictionary.
+        :param sepsets: The sepsets to merge.
+        """
+        for key, value in sepsets.items():
+            if key not in self.sepsets:
+                self.sepsets[key] = value
+            else:
+                self.sepsets[key] = self.sepsets[key].union(value)
+        self.ensure_sepset_symmetry()
+
+    def ensure_sepset_symmetry(self):
+        """
+        Ensure that the sepsets are symmetric (X, Y) -> Z and (Z, Y) -> X are the same.
+        """
+        for key, value in self.sepsets.items():
+            if key[::-1] not in self.sepsets:
+                self.sepsets[key[::-1]] = value
+            else:
+                self.sepsets[key[::-1]] = self.sepsets[key[::-1]].union(value)
+                self.sepsets[key] = self.sepsets[key[::-1]]
 
     def get_bootstrap_subsamples(self):
         """
@@ -184,7 +158,9 @@ class BCSL:
         :param learned_skeleton: The learned skeleton from the subsample.
         :return: F1 score.
         """
-        tp = len(set(original_skeleton).intersection(learned_skeleton))  # True positives
+        tp = len(
+            set(original_skeleton).intersection(learned_skeleton)
+        )  # True positives
         fp = len(set(learned_skeleton) - set(original_skeleton))  # False positives
         fn = len(set(original_skeleton) - set(learned_skeleton))  # False negatives
 
@@ -201,24 +177,40 @@ class BCSL:
         """
         Step 2: Resolve asymmetric edges using bootstrap subsamples and AEE scoring.
         """
-        original_skeletons = self.learn_local_skeleton(directed=directed)  # Learn the original skeleton
+        original_skeletons = self.learn_local_skeleton(
+            directed=directed
+        )  # Learn the original skeleton
         subsamples = self.get_bootstrap_subsamples()  # Get bootstrap subsamples
 
         # Prepare structure to store the weight matrix for each edge
-        asymmetric_edges, symmetric_edges = self.find_asymmetric_edges(original_skeletons, directed=directed)
-        weight_matrices = {edge: np.zeros((2, self.num_bootstrap_samples)) for edge in asymmetric_edges}
-        score_matrices = {edge: np.zeros((2, self.num_bootstrap_samples)) for edge in asymmetric_edges}
+        asymmetric_edges, symmetric_edges = self.find_asymmetric_edges(
+            original_skeletons, directed=directed
+        )
+        weight_matrices = {
+            edge: np.zeros((2, self.num_bootstrap_samples)) for edge in asymmetric_edges
+        }
+        score_matrices = {
+            edge: np.zeros((2, self.num_bootstrap_samples)) for edge in asymmetric_edges
+        }
 
         # For each subsample, learn the skeleton and compute F1 scores
-        for j, subsample in tqdm(enumerate(subsamples), total=self.num_bootstrap_samples, desc="Bootstrap Samples"):
+        for j, subsample in tqdm(
+            enumerate(subsamples),
+            total=len(subsamples),
+            desc="Bootstrap Samples",
+        ):
             self.data = subsample  # Temporarily replace data with subsample
             learned_skeleton = self.learn_local_skeleton(directed=directed)
 
             # Calculate F1 score for each variable pair in asymmetric edges
             for edge in asymmetric_edges:
                 X_a, X_b = edge
-                f1_a = self.compute_f1_score(original_skeletons[X_a], learned_skeleton[X_a])
-                f1_b = self.compute_f1_score(original_skeletons[X_b], learned_skeleton[X_b])
+                f1_a = self.compute_f1_score(
+                    original_skeletons[X_a], learned_skeleton[X_a]
+                )
+                f1_b = self.compute_f1_score(
+                    original_skeletons[X_b], learned_skeleton[X_b]
+                )
 
                 # Store F1 scores in the weight matrix
                 weight_matrices[edge][0, j] = f1_a  # F1 score for X_a
@@ -242,7 +234,16 @@ class BCSL:
                 aee_score = np.sum(score_matrix * weight_matrix)
 
             if aee_score > 0:
-                resolved_edges.append(edge)  # Keep the edge if the AEE score is positive
+                resolved_edges.append(
+                    edge
+                )  # Keep the edge if the AEE score is positive
+            else:
+                # Remove sepset
+                self.sepsets = {
+                    key: value
+                    for key, value in self.sepsets.items()
+                    if key != edge and (not directed or key[::-1] != edge)
+                }
 
         # The final global skeleton after resolving asymmetric edges
         self.global_skeleton = resolved_edges
@@ -304,25 +305,172 @@ class BCSL:
         """
         return list(set([tuple(sorted(edge)) for edge in edges]))
 
-
-    def orient_edges(self):
+    def orient_edges(self, method=None, independence_test_method="kci"):
         """
-        Step 3: Orient the edges in the global skeleton using BDeu and hill-climbing.
+        Step 3: Orient the edges in the global skeleton.
+        """
+        if method is None:
+            method = self.orientation_method
+        if method == "hill_climbing":
+            graph = self.orient_edges_hill_climbing()
+            return graph
+        elif method == "fci":
+            graph, edges = self.orient_edges_fci(
+                independence_test_method=independence_test_method
+            )
+            return graph
+        else:
+            raise ValueError(f"Unknown orientation method: {method}")
+
+    def orient_edges_hill_climbing(self):
+        """
+        Orient the edges in the global skeleton using BDeu or Gaussian BIC and hill-climbing.
+        :return:  The final directed acyclic graph (DAG).
         """
         if self.global_skeleton is None:
             raise ValueError("Global skeleton has not been learned or resolved yet.")
 
         # Initialize the BDeu score function
         if self.is_discrete:
-            score_function = BDeuScore(self.data, ess=1.0, use_causal_learn=self.use_causal_learn)
+            score_function = BDeuScore(
+                self.data, ess=1.0, use_causal_learn=self.use_causal_learn
+            )
         else:
-            score_function = GaussianBICScore(self.data, use_causal_learn=self.use_causal_learn)
+            score_function = GaussianBICScore(self.data)
 
         # Initialize hill-climbing with the global skeleton and BDeu scoring
-        hill_climber = HillClimber(score_function, self.get_neighbors)
-        self.dag = hill_climber.run(self.global_skeleton)  # Run hill-climbing to orient edges
+        hill_climber = HillClimber(
+            score_function, self.get_neighbors, node_names=self.node_names
+        )
+        self.dag = hill_climber.run(
+            self.global_skeleton
+        )  # Run hill-climbing to orient edges
 
         return self.dag
+
+    def orient_edges_fci(
+        self,
+        max_path_length: int = -1,
+        depth: int = -1,
+        independence_test_method="kci",
+        alpha=0.05,
+        verbose=False,
+        background_knowledge=None,
+        **kwargs,
+    ):
+        """
+        Orient the edges in the global skeleton using FCI algorithm from causal-learn.
+        Perform Fast Causal Inference (FCI) algorithm for causal discovery
+
+        Parameters
+        ----------
+        dataset: data set (numpy ndarray), shape (n_samples, n_features). The input data, where n_samples is the number of
+                samples and n_features is the number of features.
+        independence_test_method: str, name of the function of the independence test being used
+                [fisherz, chisq, gsq, kci]
+               - fisherz: Fisher's Z conditional independence test
+               - chisq: Chi-squared conditional independence test
+               - gsq: G-squared conditional independence test
+               - kci: Kernel-based conditional independence test
+        alpha: float, desired significance level of independence tests (p_value) in (0,1)
+        depth: The depth for the fast adjacency search, or -1 if unlimited
+        max_path_length: the maximum length of any discriminating path, or -1 if unlimited.
+        verbose: True is verbose output should be printed or logged
+        background_knowledge: background knowledge
+
+        Returns
+        -------
+        graph : a GeneralGraph object, where graph.graph[j,i]=1 and graph.graph[i,j]=-1 indicates  i --> j ,
+                        graph.graph[i,j] = graph.graph[j,i] = -1 indicates i --- j,
+                        graph.graph[i,j] = graph.graph[j,i] = 1 indicates i <-> j,
+                        graph.graph[j,i]=1 and graph.graph[i,j]=2 indicates  i o-> j.
+        edges : list
+            Contains graph's edges properties.
+            If edge.properties have the Property 'nl', then there is no latent confounder. Otherwise,
+                there are possibly latent confounders.
+            If edge.properties have the Property 'dd', then it is definitely direct. Otherwise,
+                it is possibly direct.
+            If edge.properties have the Property 'pl', then there are possibly latent confounders. Otherwise,
+                there is no latent confounder.
+            If edge.properties have the Property 'pd', then it is possibly direct. Otherwise,
+                it is definitely direct.
+        """
+
+        # if dataset.shape[0] < dataset.shape[1]:
+        #     warnings.warn("The number of features is much larger than the sample size!")
+        #
+        independence_test_method = CIT(
+            self.data, method=independence_test_method, **kwargs
+        )
+
+        ## ------- check parameters ------------
+        if (depth is None) or type(depth) != int:
+            raise TypeError("'depth' must be 'int' type!")
+        if (background_knowledge is not None) and type(
+            background_knowledge
+        ) != BackgroundKnowledge:
+            raise TypeError(
+                "'background_knowledge' must be 'BackgroundKnowledge' type!"
+            )
+        if type(max_path_length) != int:
+            raise TypeError("'max_path_length' must be 'int' type!")
+        ## ------- end check parameters ------------
+
+        graph = get_undirected_graph_from_skeleton(
+            skeleton=self.global_skeleton, node_names=self.node_names
+        )
+        nodes = graph.nodes
+
+        reorientAllWith(graph, Endpoint.CIRCLE)
+
+        rule0(graph, nodes, self.sepsets, knowledge=background_knowledge, verbose=False)
+
+        removeByPossibleDsep(graph, independence_test_method, alpha, self.sepsets)
+
+        reorientAllWith(graph, Endpoint.CIRCLE)
+        rule0(graph, nodes, self.sepsets, knowledge=background_knowledge, verbose=False)
+
+        change_flag = True
+        first_time = True
+
+        while change_flag:
+            change_flag = False
+            change_flag = rulesR1R2cycle(
+                graph, background_knowledge, change_flag, verbose
+            )
+            change_flag = ruleR3(
+                graph, self.sepsets, background_knowledge, change_flag, verbose
+            )
+
+            if change_flag or (
+                first_time
+                and background_knowledge is not None
+                and len(background_knowledge.forbidden_rules_specs) > 0
+                and len(background_knowledge.required_rules_specs) > 0
+                and len(background_knowledge.tier_map.keys()) > 0
+            ):
+                change_flag = ruleR4B(
+                    graph=graph,
+                    maxPathLength=max_path_length,
+                    data=self.data,
+                    independence_test_method=independence_test_method,
+                    alpha=alpha,
+                    sep_sets=self.sepsets,
+                    change_flag=change_flag,
+                    bk=background_knowledge,
+                    verbose=verbose,
+                )
+
+                first_time = False
+
+                if verbose:
+                    print("Epoch")
+
+        graph.set_pag(True)
+
+        edges = get_color_edges(graph)
+
+        return graph, edges
 
     def get_neighbors(self, graph):
         """

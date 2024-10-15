@@ -1,11 +1,76 @@
-from symbol import parameters
+import numpy as np
+
+np.mat = np.asmatrix
 
 import numpy as np
-np.mat = np.asmatrix
-from causallearn.score.LocalScoreFunction import local_score_BIC
+from numpy.linalg import LinAlgError
+
+
+def local_score_BIC(Data: np.ndarray, i: int, PAi: list, parameters=None) -> float:
+    """
+    Calculate the *negative* local score with BIC for the linear Gaussian continuous data case.
+    Adapted from causal-learn with added ridge regression when the covariance matrix is singular.
+
+    Parameters
+    ----------
+    Data: ndarray, shape (n_samples, n_features)
+        The data matrix (samples as rows, features as columns).
+    i: int
+        The index of the target variable for which the score is calculated.
+    PAi: list of int
+        The list of parent variable indices.
+    parameters: dict, optional
+        Dictionary with additional parameters. Expected key is:
+        - 'lambda_value': float, penalty discount for BIC (default is 1).
+
+    Returns
+    -------
+    score: float
+        The negative local BIC score for the target variable with the specified parents.
+    """
+
+    # Covariance matrix of the data (transpose so features are columns)
+    cov = np.cov(Data.T)
+    n = Data.shape[0]  # Number of samples
+
+    # Set default lambda_value if not provided
+    if parameters is None:
+        parameters = {}
+
+    lambda_value = parameters.get("lambda_value", 1) if parameters else 1
+
+    # Case 1: No parents, simply return BIC based on the variance of the target variable
+    if len(PAi) == 0:
+        return n * np.log(cov[i, i])
+
+    # Case 2: Parents exist, perform regression using the covariance matrix
+    # Extract relevant parts of the covariance matrix
+    yX = cov[i, PAi]  # Covariance between target i and its parents PAi
+    XX = cov[np.ix_(PAi, PAi)]  # Covariance matrix of the parents
+    try:
+        # Try to invert the XX matrix
+        XX_inv = np.linalg.inv(XX)
+    except LinAlgError:
+        # Add a small perturbation to stabilize the matrix inversion in case of singularity
+        epsilon = 1e-5
+        XX_inv = np.linalg.inv(XX + epsilon * np.eye(len(PAi)))
+
+    # Compute the conditional variance (variance of i given its parents)
+    conditional_variance = cov[i, i] - yX @ XX_inv @ yX.T
+
+    # Ensure conditional variance is positive (if not, we use a small positive value)
+    if conditional_variance <= 0:
+        conditional_variance = epsilon
+
+    # Compute the log determinant term for the BIC score
+    H = np.log(conditional_variance)
+
+    # Return the negative local BIC score
+    return n * H + np.log(n) * len(PAi) * lambda_value
+
 
 class GaussianBICScore:
-    def __init__(self, data, use_causal_learn=False):
+    def __init__(self, data, parameters=None):
         """
         Initialize the Gaussian BIC score calculator.
         :param data: The dataset used for scoring, where data is a numpy array of shape (n_samples, n_variables).
@@ -13,7 +78,7 @@ class GaussianBICScore:
         """
         self.data = data
         self.n_samples, self.n_vars = data.shape
-        self.use_causal_learn = use_causal_learn
+        self.parameters = parameters
 
     def calculate(self, graph):
         """
@@ -43,55 +108,12 @@ class GaussianBICScore:
     def compute_bic_for_variable(self, var, parents):
         """
         Compute the BIC score for a single variable and its parent set.
-        If use_causal_learn is set to True, the BIC score will be calculated using causal-learn's local_score_BIC.
         :param var: The target variable index.
         :param parents: A list of parent variable indices for the target variable.
         :return: The BIC score contribution for the variable and its parents.
         """
-        if self.use_causal_learn:
-            # Use causal-learn's BIC scoring function
-            score = self.causal_learn_bic(var, parents)
-        else:
-            # Use the custom Gaussian BIC method
-            score = self.custom_gaussian_bic(var, parents)
+        score = -local_score_BIC(self.data, var, parents, parameters=self.parameters)
         return score
-
-    def causal_learn_bic(self, var, parents, parameters=None):
-        """
-        Use causal-learn's local_score_BIC to compute the BIC score for a variable and its parents.
-        :param var: The target variable index.
-        :param parents: A list of parent variable indices for the target variable.
-        :return: The BIC score from causal-learn.
-        """
-        # Set up the parameters for local_score_BIC (default options can be used)
-        score = -local_score_BIC(self.data, var, parents, parameters=parameters)
-        return score
-
-    def custom_gaussian_bic(self, var, parents):
-        """
-        Compute the custom Gaussian BIC score for a single variable and its parent set.
-        This implementation uses a multivariate Gaussian model.
-        :param var: The target variable index.
-        :param parents: A list of parent variable indices for the target variable.
-        :return: The log-likelihood and complexity penalty for the variable and its parents.
-        """
-        if len(parents) == 0:
-            # No parents: treat as a simple univariate Gaussian
-            variance = np.var(self.data[:, var], ddof=1)
-            log_likelihood = -0.5 * self.n_samples * np.log(2 * np.pi * variance)
-            complexity = 1  # Only the variance parameter
-        else:
-            # Multiple linear regression for the target variable on its parents
-            X = self.data[:, parents]  # Parent variables (design matrix)
-            y = self.data[:, var]  # Target variable
-            beta_hat = np.linalg.lstsq(X, y, rcond=None)[0]  # OLS regression coefficients
-            residuals = y - X @ beta_hat
-            variance = np.var(residuals, ddof=1)
-
-            log_likelihood = -0.5 * self.n_samples * np.log(2 * np.pi * variance)
-            complexity = len(parents) + 1  # One parameter for each parent plus the variance
-
-        return - log_likelihood + 0.5 * complexity * np.log(self.n_samples)
 
 
 # Sample usage of GaussianBICScore with causal-learn option
@@ -103,15 +125,10 @@ if __name__ == '__main__':
     example_graph = [(0, 1), (1, 2), (2, 3), (3, 4)]
 
     # Initialize Gaussian BIC scoring function with causal-learn option
-    gaussian_bic_scorer = GaussianBICScore(data, use_causal_learn=True)
+    gaussian_bic_scorer = GaussianBICScore(data)
 
     # Calculate BIC score using causal-learn for the example graph
     bic_score = gaussian_bic_scorer.calculate(example_graph)
 
-    print(f"BIC Score using causal-learn: {bic_score}")
+    print(f"BIC Score: {bic_score}")
 
-    # Calculate BIC score using custom Gaussian BIC for comparison
-    gaussian_bic_scorer_custom = GaussianBICScore(data, use_causal_learn=False)
-    bic_score_custom = gaussian_bic_scorer_custom.calculate(example_graph)
-
-    print(f"Custom Gaussian BIC Score: {bic_score_custom}")
