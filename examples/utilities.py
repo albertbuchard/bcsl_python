@@ -3,11 +3,15 @@ import time
 from causallearn.search.ConstraintBased.FCI import fci
 
 from bcsl.bcsl import BCSL
-from bcsl.graph_utils import visualize_graph
+from bcsl.graph_utils import visualize_graph, get_undirected_graph_from_skeleton
 
 
 def plot_all_methods(
-    data, num_bootstrap_samples=1, max_k=1, conditional_independence_method="kci"
+    data,
+    num_bootstrap_samples=1,
+    max_k=1,
+    conditional_independence_method="kci",
+    bootstrap_all_edges=False,
 ):
     bcsl = BCSL(
         data,
@@ -27,9 +31,14 @@ def plot_all_methods(
     # Step 2: Resolve asymmetric edges using bootstrap
     start_time = time.time()
     print("Resolving Asymmetric Edges...")
-    global_skeleton = bcsl.resolve_asymmetric_edges()
+    global_skeleton = bcsl.resolve_asymmetric_edges(
+        bootstrap_all_edges=bootstrap_all_edges
+    )
     print("Global Skeleton (resolved):", global_skeleton)
     print("Time taken:", time.time() - start_time)
+    graph_skeleton = get_undirected_graph_from_skeleton(global_skeleton, data.columns)
+    visualize_graph(graph_skeleton, title="BCSL Global Skeleton", show=True)
+    return
 
     # Step 3a: Orient edges using BDeu and hill-climbing
     start_time = time.time()

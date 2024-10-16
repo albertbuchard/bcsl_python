@@ -10,10 +10,12 @@ from examples.utilities import plot_all_methods
 
 
 def compare_easy_dataset(
-    num_bootstrap_samples=1, conditional_independence_method="kci"
+    num_bootstrap_samples=1,
+    conditional_independence_method="kci",
+    bootstrap_all_edges=False,
 ):
     # Generate synthetic data for testing
-    np.random.seed(42)
+    np.random.seed(43)
 
     # Define True Causal Graph
     true_graph = create_true_causal_graph_easy()
@@ -47,6 +49,7 @@ def compare_easy_dataset(
         data,
         num_bootstrap_samples,
         conditional_independence_method=conditional_independence_method,
+        bootstrap_all_edges=bootstrap_all_edges,
     )
 
 

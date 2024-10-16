@@ -1,19 +1,11 @@
 import numpy as np
 import pandas as pd
-from causallearn.graph.Endpoint import Endpoint
-from causallearn.search.ConstraintBased.FCI import (
-    reorientAllWith,
-    rule0,
-    removeByPossibleDsep,
-    rulesR1R2cycle,
-    ruleR3,
-    ruleR4B,
-    get_color_edges,
-)
 from causallearn.utils.PCUtils.BackgroundKnowledge import BackgroundKnowledge
 from causallearn.utils.cit import CIT
 from tqdm import tqdm
 
+from bcsl.aee import compute_aee_variance, get_aee_threshold
+from bcsl.fci import fci_orient_edges_from_graph_node_sepsets
 from bcsl.graph_utils import get_undirected_graph_from_skeleton
 from bcsl.hill_climber import HillClimber
 from bcsl.hiton import Hiton
@@ -30,6 +22,8 @@ class BCSL:
         is_discrete=False,
         orientation_method="hill_climbing",
         conditional_independence_method="fisherz",
+        bootstrap_all_edges=True,
+        use_aee_alpha=0.05,
         verbose=False,
     ):
         """
@@ -40,6 +34,8 @@ class BCSL:
         :param is_discrete: Whether the data is discrete or continuous.
         :param orientation_method: The method to use for edge orientation (hill_climbing or fci).
         :param conditional_independence_method: The method to use for conditional independence tests from causal-learn.
+        :param bootstrap_all_edges: Whether to bootstrap all edges after local skeleton learning or only asymmetric edges detected on the whole dataset.
+        :param use_aee_alpha: Alpha to use the AEE alpha threshold for resolving asymmetric edges.
         :param verbose: Whether to print verbose output.
         """
         if isinstance(data, pd.DataFrame):
@@ -57,6 +53,8 @@ class BCSL:
         self.max_k = max_k
         self.is_discrete = is_discrete
         self.orientation_method = orientation_method
+        self.bootstrap_all_edges = bootstrap_all_edges
+        self.use_aee_alpha = use_aee_alpha
         self.verbose = verbose
 
         self.hiton = Hiton(
@@ -66,7 +64,7 @@ class BCSL:
             verbose=verbose,
         )
 
-    def conditional_independence_test(self, X, Y, Z=[]):
+    def conditional_independence_test(self, X, Y, Z=None):
         """
         Perform a conditional independence test to determine if X and Y are independent given Z.
         For discrete data, a chi-squared test is used. For continuous data, partial correlation is used.
@@ -173,19 +171,41 @@ class BCSL:
         f1_score = 2 * (precision * recall) / (precision + recall)
         return f1_score
 
-    def resolve_asymmetric_edges(self, directed=False, w=1.1):
+    def resolve_asymmetric_edges(self, directed=False, w=1.1, bootstrap_all_edges=None):
         """
         Step 2: Resolve asymmetric edges using bootstrap subsamples and AEE scoring.
+
+        :param directed: Whether to consider directed edges from local skeletons (default: False).
+        :param w: The weight to apply to the F1 score when resolving ties (default: 1.1).
+        :param bootstrap_all_edges: Whether to bootstrap all edges (default: False).
         """
-        original_skeletons = self.learn_local_skeleton(
-            directed=directed
-        )  # Learn the original skeleton
+        if bootstrap_all_edges is None:
+            bootstrap_all_edges = self.bootstrap_all_edges
+        original_skeletons = self.local_skeletons
+        if original_skeletons is None:
+            print(
+                "Local skeletons have not been learned yet. Learning local skeletons..."
+            )
+            original_skeletons = self.learn_local_skeleton(
+                directed=directed
+            )  # Learn the original skeleton
         subsamples = self.get_bootstrap_subsamples()  # Get bootstrap subsamples
 
         # Prepare structure to store the weight matrix for each edge
         asymmetric_edges, symmetric_edges = self.find_asymmetric_edges(
             original_skeletons, directed=directed
         )
+
+        if bootstrap_all_edges:
+            print("Bootstrapping all edges from the local skeletons...")
+            asymmetric_edges = symmetric_edges + asymmetric_edges
+            symmetric_edges = []
+
+        if not asymmetric_edges:
+            print("No asymmetric edges found. Returning the global skeleton...")
+            self.global_skeleton = symmetric_edges
+            return self.global_skeleton
+
         weight_matrices = {
             edge: np.zeros((2, self.num_bootstrap_samples)) for edge in asymmetric_edges
         }
@@ -220,6 +240,15 @@ class BCSL:
                 score_matrices[edge][0, j] = 1 if edge in learned_skeleton[X_a] else -1
                 score_matrices[edge][1, j] = 1 if edge in learned_skeleton[X_b] else -1
 
+        threshold = 0
+        if self.use_aee_alpha is not None:
+            threshold = get_aee_threshold(
+                N=2 * len(subsamples),
+                w=np.mean(weight_matrices),
+                rho=np.mean([np.cov(score_matrices[edge]) for edge in weight_matrices]),
+                alpha=self.use_aee_alpha,
+            )
+
         # Now perform AEE scoring for each edge
         resolved_edges = symmetric_edges.copy()
         for edge, weight_matrix in weight_matrices.items():
@@ -233,7 +262,7 @@ class BCSL:
                 weight_matrix[1, selector] = weight_matrix[1, selector] * w
                 aee_score = np.sum(score_matrix * weight_matrix)
 
-            if aee_score > 0:
+            if aee_score > threshold:
                 resolved_edges.append(
                     edge
                 )  # Keep the edge if the AEE score is positive
@@ -309,6 +338,11 @@ class BCSL:
         """
         Step 3: Orient the edges in the global skeleton.
         """
+        if self.global_skeleton is None:
+            print(
+                "Global skeleton has not been learned or resolved yet. Learning global skeleton..."
+            )
+            self.global_skeleton = self.resolve_asymmetric_edges()
         if method is None:
             method = self.orientation_method
         if method == "hill_climbing":
@@ -421,54 +455,17 @@ class BCSL:
         )
         nodes = graph.nodes
 
-        reorientAllWith(graph, Endpoint.CIRCLE)
-
-        rule0(graph, nodes, self.sepsets, knowledge=background_knowledge, verbose=False)
-
-        removeByPossibleDsep(graph, independence_test_method, alpha, self.sepsets)
-
-        reorientAllWith(graph, Endpoint.CIRCLE)
-        rule0(graph, nodes, self.sepsets, knowledge=background_knowledge, verbose=False)
-
-        change_flag = True
-        first_time = True
-
-        while change_flag:
-            change_flag = False
-            change_flag = rulesR1R2cycle(
-                graph, background_knowledge, change_flag, verbose
-            )
-            change_flag = ruleR3(
-                graph, self.sepsets, background_knowledge, change_flag, verbose
-            )
-
-            if change_flag or (
-                first_time
-                and background_knowledge is not None
-                and len(background_knowledge.forbidden_rules_specs) > 0
-                and len(background_knowledge.required_rules_specs) > 0
-                and len(background_knowledge.tier_map.keys()) > 0
-            ):
-                change_flag = ruleR4B(
-                    graph=graph,
-                    maxPathLength=max_path_length,
-                    data=self.data,
-                    independence_test_method=independence_test_method,
-                    alpha=alpha,
-                    sep_sets=self.sepsets,
-                    change_flag=change_flag,
-                    bk=background_knowledge,
-                    verbose=verbose,
-                )
-
-                first_time = False
-
-                if verbose:
-                    print("Epoch")
-
-        graph.set_pag(True)
-
-        edges = get_color_edges(graph)
+        graph, edges = fci_orient_edges_from_graph_node_sepsets(
+            data=self.data,
+            graph=graph,
+            nodes=nodes,
+            sepsets=self.sepsets,
+            background_knowledge=background_knowledge,
+            independence_test_method=independence_test_method,
+            alpha=alpha,
+            max_path_length=max_path_length,
+            verbose=verbose,
+        )
 
         return graph, edges
 
