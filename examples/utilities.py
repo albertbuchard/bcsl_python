@@ -11,13 +11,15 @@ def plot_all_methods(
     num_bootstrap_samples=1,
     max_k=1,
     conditional_independence_method="kci",
-    bootstrap_all_edges=False,
+    bootstrap_all_edges=True,
+    multiple_comparison_correction=None,
 ):
     bcsl = BCSL(
         data,
         num_bootstrap_samples=num_bootstrap_samples,
         conditional_independence_method=conditional_independence_method,
         max_k=max_k,
+        multiple_comparison_correction=multiple_comparison_correction,
         verbose=False,
     )
 
@@ -38,7 +40,6 @@ def plot_all_methods(
     print("Time taken:", time.time() - start_time)
     graph_skeleton = get_undirected_graph_from_skeleton(global_skeleton, data.columns)
     visualize_graph(graph_skeleton, title="BCSL Global Skeleton", show=True)
-    return
 
     # Step 3a: Orient edges using BDeu and hill-climbing
     start_time = time.time()

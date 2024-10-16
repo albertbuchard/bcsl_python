@@ -4,15 +4,35 @@ from tqdm import tqdm
 
 from bcsl.graph_utils import get_all_edges_from
 
+from statsmodels.stats.multitest import fdrcorrection
+
 
 class Hiton:
-    def __init__(self, data, conditional_independence_test, max_k=3, verbose=False):
-        self.data = data
+    def __init__(
+        self,
+        n_vars,
+        conditional_independence_test,
+        max_k=3,
+        multiple_comparison_correction=None,
+        alpha=0.05,
+        verbose=False,
+    ):
+        """
+        Initialize the HITON algorithm.
+        :param n_vars:  Number of variables in the dataset.
+        :param conditional_independence_test:  A callable function that accepts three arguments X: int, Y: int, Z: List[int] (data is not passed explicitly)
+        :param max_k:  Maximum size of the conditioning set for conditional independence tests.
+        :param multiple_comparison_correction:  Method for multiple comparison correction (either None or "fdr" or "bonferroni").
+        :param verbose:  Whether to display progress bars.
+        """
+        self.n_vars = n_vars
         self.conditional_independence_test = conditional_independence_test
+        self.multiple_comparison_correction = multiple_comparison_correction
+        self.alpha = alpha
         self.max_k = max_k
         self.verbose = verbose
 
-    def get_markov_blanket(self, target_var, alpha=0.05, spouses=True):
+    def get_markov_blanket(self, target_var, alpha=None, spouses=True):
         """
         HITON algorithm to find the Markov Blanket (MB) set for a target variable.
         This combines HITON-PC for the Parents and Children and the Spouse discovery.
@@ -21,7 +41,12 @@ class Hiton:
         :param spouses: Whether to discover spouses (default: True).
         :return: The MB set (indices of variables in the Markov Blanket), skeleton, sepset, and ci_count.
         """
-        n_vars = self.data.shape[1]
+        if alpha is None:
+            alpha = self.alpha
+        if alpha is None or alpha <= 0 or alpha >= 1:
+            raise ValueError("alpha (Type I error rate) must be in the range (0, 1).")
+
+        n_vars = self.n_vars
         candidate_set = list(range(n_vars))
         candidate_set.remove(target_var)  # Remove the target itself
         ci_count = 0  # Counter for the number of conditional independence tests
@@ -29,11 +54,29 @@ class Hiton:
 
         # Step 1: HITON-PC (Parents and Children discovery)
         variDepSet = []
-        for var in candidate_set:
-            p_value = self.conditional_independence_test(target_var, var)
-            ci_count += 1
-            if p_value < alpha:  # Dependent variables
-                variDepSet.append([var, p_value])
+        if self.multiple_comparison_correction is None:
+            for var in candidate_set:
+                p_value = self.conditional_independence_test(target_var, var)
+                ci_count += 1
+                if p_value < alpha:  # Dependent variables
+                    variDepSet.append([var, p_value])
+        else:
+            # Apply multiple comparison correction
+            p_values = []
+            for var in candidate_set:
+                p = self.conditional_independence_test(target_var, var)
+                p_values.append((var, p))
+                ci_count += 1
+            # Adjust p-values based on the correction method
+            if self.multiple_comparison_correction == "bonferroni":
+                adjusted_alpha = alpha / len(p_values)
+                variDepSet = [[var, p] for var, p in p_values if p < adjusted_alpha]
+            elif self.multiple_comparison_correction == "fdr":
+                vars_, ps = zip(*p_values)
+                rejected, corrected_p = fdrcorrection(ps, alpha=alpha)
+                variDepSet = [[var, p] for var, p, r in zip(vars_, ps, rejected) if r]
+            else:
+                raise ValueError("Unsupported multiple comparison correction method.")
 
         # Sort candidate variables by dependency (smaller p-value means stronger dependency)
         variDepSet = sorted(variDepSet, key=lambda x: x[1])
@@ -45,6 +88,8 @@ class Hiton:
             loop_over = tqdm(candidate_PC, desc="HITON-PC: Shrink Phase", position=2)
         else:
             loop_over = candidate_PC
+
+        # TODO Multiple comparison correction for the shrink phase? (false negatives...)
         for x in loop_over:
             conditions_Set = [i for i in pc_set if i != x]
 
@@ -77,7 +122,7 @@ class Hiton:
                     x, alpha, spouses=False
                 )  # Find PC of each PC variable (Spouse discovery)
                 ci_count += ci_num2
-
+                # TODO Should we correct for multiple comparisons here as well?
                 for y in PCofPC:
                     if y != target_var and y not in direct_neighbors:
                         # Add conditioning on x (spouse candidate) for the target variable

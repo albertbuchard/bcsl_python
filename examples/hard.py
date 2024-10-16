@@ -10,7 +10,10 @@ from examples.utilities import plot_all_methods
 
 
 def compare_hard_dataset(
-    num_bootstrap_samples=1, conditional_independence_method="kci"
+    num_bootstrap_samples=1,
+    conditional_independence_method="kci",
+    multiple_comparison_correction=None,
+    bootstrap_all_edges=True,
 ):
     # Generate synthetic data for testing
     np.random.seed(42)
@@ -74,6 +77,8 @@ def compare_hard_dataset(
         num_bootstrap_samples,
         max_k=1,
         conditional_independence_method=conditional_independence_method,
+        multiple_comparison_correction=multiple_comparison_correction,
+        bootstrap_all_edges=bootstrap_all_edges,
     )
 
 

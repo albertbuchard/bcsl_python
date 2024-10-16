@@ -4,7 +4,10 @@ from causallearn.utils.PCUtils.BackgroundKnowledge import BackgroundKnowledge
 from causallearn.utils.cit import CIT
 from tqdm import tqdm
 
-from bcsl.aee import compute_aee_variance, get_aee_threshold
+from bcsl.aee import (
+    get_aee_threshold,
+    get_observed_aee_threshold,
+)
 from bcsl.fci import fci_orient_edges_from_graph_node_sepsets
 from bcsl.graph_utils import get_undirected_graph_from_skeleton
 from bcsl.hill_climber import HillClimber
@@ -24,6 +27,7 @@ class BCSL:
         conditional_independence_method="fisherz",
         bootstrap_all_edges=True,
         use_aee_alpha=0.05,
+        multiple_comparison_correction=None,
         verbose=False,
     ):
         """
@@ -36,6 +40,7 @@ class BCSL:
         :param conditional_independence_method: The method to use for conditional independence tests from causal-learn.
         :param bootstrap_all_edges: Whether to bootstrap all edges after local skeleton learning or only asymmetric edges detected on the whole dataset.
         :param use_aee_alpha: Alpha to use the AEE alpha threshold for resolving asymmetric edges.
+        :param multiple_comparison_correction: The method to use for multiple comparison correction. Default is None. Options are: 'bonferroni', 'fdr'.
         :param verbose: Whether to print verbose output.
         """
         if isinstance(data, pd.DataFrame):
@@ -56,12 +61,14 @@ class BCSL:
         self.bootstrap_all_edges = bootstrap_all_edges
         self.use_aee_alpha = use_aee_alpha
         self.verbose = verbose
+        self._cit = None
 
         self.hiton = Hiton(
-            self.data,
+            n_vars=self.data.shape[1],
             conditional_independence_test=self.conditional_independence_test,
             max_k=max_k,
             verbose=verbose,
+            multiple_comparison_correction=multiple_comparison_correction,
         )
 
     def conditional_independence_test(self, X, Y, Z=None):
@@ -73,17 +80,18 @@ class BCSL:
         :param Z: The set of variables to condition on (can be empty).
         :return: p-value from the conditional independence test.
         """
-        if self.is_discrete:
-            cit_obj = CIT(
-                self.data,
-                method="chisq",
-            )
-        else:
-            cit_obj = CIT(
-                self.data,
-                method=self.conditional_independence_method,
-            )
-        p_value = cit_obj(X, Y, Z)
+        if self._cit is None:
+            if self.is_discrete:
+                self._cit = CIT(
+                    self.data,
+                    method="chisq",
+                )
+            else:
+                self._cit = CIT(
+                    self.data,
+                    method=self.conditional_independence_method,
+                )
+        p_value = self._cit(X, Y, Z)
         return p_value
 
     def learn_local_skeleton(self, directed=False):
@@ -242,12 +250,21 @@ class BCSL:
 
         threshold = 0
         if self.use_aee_alpha is not None:
-            threshold = get_aee_threshold(
-                N=2 * len(subsamples),
-                w=np.mean(weight_matrices),
-                rho=np.mean([np.cov(score_matrices[edge]) for edge in weight_matrices]),
-                alpha=self.use_aee_alpha,
+            threshold = get_observed_aee_threshold(
+                score_matrices, weight_matrices, self.use_aee_alpha
             )
+            # w = np.mean(
+            #     [np.mean(weight_matrix) for weight_matrix in weight_matrices.values()]
+            # )
+            # rho = np.mean(
+            #     [
+            #         np.var(score_matrix.flatten())
+            #         for score_matrix in score_matrices.values()
+            #     ]
+            # )
+            # threshold = get_aee_threshold(
+            #     self.num_bootstrap_samples, w, rho, self.use_aee_alpha
+            # )
 
         # Now perform AEE scoring for each edge
         resolved_edges = symmetric_edges.copy()
@@ -366,9 +383,7 @@ class BCSL:
 
         # Initialize the BDeu score function
         if self.is_discrete:
-            score_function = BDeuScore(
-                self.data, ess=1.0, use_causal_learn=self.use_causal_learn
-            )
+            score_function = BDeuScore(self.data, ess=1.0, use_causal_learn=True)
         else:
             score_function = GaussianBICScore(self.data)
 
@@ -437,7 +452,6 @@ class BCSL:
             self.data, method=independence_test_method, **kwargs
         )
 
-        ## ------- check parameters ------------
         if (depth is None) or type(depth) != int:
             raise TypeError("'depth' must be 'int' type!")
         if (background_knowledge is not None) and type(
@@ -448,7 +462,6 @@ class BCSL:
             )
         if type(max_path_length) != int:
             raise TypeError("'max_path_length' must be 'int' type!")
-        ## ------- end check parameters ------------
 
         graph = get_undirected_graph_from_skeleton(
             skeleton=self.global_skeleton, node_names=self.node_names
