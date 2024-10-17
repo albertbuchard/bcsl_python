@@ -32,7 +32,7 @@ def fci_orient_edges_from_graph_node_sepsets(
     """
     Orient edges in a graph using the FCI algorithm from a graph, nodes, sepsets.
     :param data: np.ndarray: The data.
-    :param graph: GeneralGraph: The original graph, unoriented.
+    :param graph: GeneralGraph: The original graph, undirected..
     :param nodes: List[Node]: The nodes in the graph.
     :param sepsets: Dict[Tuple[int, int], Set[int]]: The sepsets.
     :param background_knowledge: BackgroundKnowledge: The background knowledge.
