@@ -1,3 +1,9 @@
+from typing import Tuple, List, Set, Dict
+
+import numpy as np
+from causallearn.graph.Node import Node
+from causallearn.graph.GeneralGraph import GeneralGraph
+from causallearn.graph.Edge import Edge
 from causallearn.graph.Endpoint import Endpoint
 from causallearn.search.ConstraintBased.FCI import (
     reorientAllWith,
@@ -8,19 +14,35 @@ from causallearn.search.ConstraintBased.FCI import (
     ruleR4B,
     get_color_edges,
 )
+from causallearn.utils.PCUtils import BackgroundKnowledge
+from causallearn.utils.cit import CIT
 
 
 def fci_orient_edges_from_graph_node_sepsets(
-    data,
-    graph,
-    nodes,
-    sepsets,
-    background_knowledge,
-    independence_test_method,
-    alpha,
-    max_path_length,
-    verbose,
-):
+    data: np.ndarray,
+    graph: GeneralGraph,
+    nodes: List[Node],
+    sepsets: Dict[Tuple[int, int], Set[int]],
+    background_knowledge: BackgroundKnowledge,
+    independence_test_method: str,
+    alpha: float,
+    max_path_length: int,
+    verbose: bool,
+) -> Tuple[GeneralGraph, List[Edge]]:
+    """
+    Orient edges in a graph using the FCI algorithm from a graph, nodes, sepsets.
+    :param data: np.ndarray: The data.
+    :param graph: GeneralGraph: The original graph, unoriented.
+    :param nodes: List[Node]: The nodes in the graph.
+    :param sepsets: Dict[Tuple[int, int], Set[int]]: The sepsets.
+    :param background_knowledge: BackgroundKnowledge: The background knowledge.
+    :param independence_test_method: str: The independence test method.
+    :param alpha: float: The alpha value.
+    :param max_path_length: int: The maximum path length.
+    :param verbose: bool: Whether to print progress.
+    :return:
+    """
+    independence_test_method = CIT(data, method=independence_test_method)
     reorientAllWith(graph, Endpoint.CIRCLE)
     rule0(graph, nodes, sepsets, knowledge=background_knowledge, verbose=False)
     removeByPossibleDsep(graph, independence_test_method, alpha, sepsets)

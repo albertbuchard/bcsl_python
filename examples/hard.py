@@ -14,6 +14,7 @@ def compare_hard_dataset(
     conditional_independence_method="kci",
     multiple_comparison_correction=None,
     bootstrap_all_edges=True,
+    max_k=1,
 ):
     # Generate synthetic data for testing
     np.random.seed(42)
@@ -75,7 +76,7 @@ def compare_hard_dataset(
     plot_all_methods(
         data,
         num_bootstrap_samples,
-        max_k=1,
+        max_k=max_k,
         conditional_independence_method=conditional_independence_method,
         multiple_comparison_correction=multiple_comparison_correction,
         bootstrap_all_edges=bootstrap_all_edges,

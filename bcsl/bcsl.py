@@ -1,15 +1,20 @@
+from typing import List, Set, Tuple, Dict, Optional, Union
+
 import numpy as np
 import pandas as pd
+from causallearn.graph.GeneralGraph import GeneralGraph
 from causallearn.utils.PCUtils.BackgroundKnowledge import BackgroundKnowledge
 from causallearn.utils.cit import CIT
 from tqdm import tqdm
 
 from bcsl.aee import (
-    get_aee_threshold,
     get_observed_aee_threshold,
 )
 from bcsl.fci import fci_orient_edges_from_graph_node_sepsets
-from bcsl.graph_utils import get_undirected_graph_from_skeleton
+from bcsl.graph_utils import (
+    get_undirected_graph_from_skeleton,
+    get_edge_list_from_graph,
+)
 from bcsl.hill_climber import HillClimber
 from bcsl.hiton import Hiton
 from bcsl.scores.bdeu import BDeuScore
@@ -19,57 +24,76 @@ from bcsl.scores.gaussian_bic import GaussianBICScore
 class BCSL:
     def __init__(
         self,
-        data,
-        num_bootstrap_samples=100,
-        max_k=3,
-        is_discrete=False,
-        orientation_method="hill_climbing",
-        conditional_independence_method="fisherz",
-        bootstrap_all_edges=True,
-        use_aee_alpha=0.05,
-        multiple_comparison_correction=None,
-        verbose=False,
-    ):
+        data: Union[pd.DataFrame, np.ndarray],
+        num_bootstrap_samples: int = 100,
+        max_k: int = 3,
+        is_discrete: bool = False,
+        orientation_method: str = "hill_climbing",
+        conditional_independence_method: str = "fisherz",
+        bootstrap_all_edges: bool = True,
+        use_aee_alpha: float = 0.05,
+        multiple_comparison_correction: Optional[str] = None,
+        verbose: bool = False,
+    ) -> None:
         """
         Initialize the BCSL algorithm.
+
         :param data: The dataset to be used (n x m), where n is samples and m is variables.
         :param num_bootstrap_samples: Number of bootstrap samples for integrated learning.
         :param max_k: Maximum number of variables to condition on in independence tests.
         :param is_discrete: Whether the data is discrete or continuous.
-        :param orientation_method: The method to use for edge orientation (hill_climbing or fci).
+        :param orientation_method: The method to use for edge orientation ('hill_climbing' or 'fci').
         :param conditional_independence_method: The method to use for conditional independence tests from causal-learn.
         :param bootstrap_all_edges: Whether to bootstrap all edges after local skeleton learning or only asymmetric edges detected on the whole dataset.
         :param use_aee_alpha: Alpha to use the AEE alpha threshold for resolving asymmetric edges.
-        :param multiple_comparison_correction: The method to use for multiple comparison correction. Default is None. Options are: 'bonferroni', 'fdr'.
+        :param multiple_comparison_correction: The method to use for multiple comparison correction. Options are: 'bonferroni', 'fdr'.
         :param verbose: Whether to print verbose output.
         """
-        if isinstance(data, pd.DataFrame):
-            self.node_names = list(data.columns)
-            data = data.values
-        else:
-            self.node_names = [f"X{i}" for i in range(data.shape[1])]
-        self.data = data
-        self.num_bootstrap_samples = num_bootstrap_samples
-        self.conditional_independence_method = conditional_independence_method
-        self.local_skeletons = None
-        self.global_skeleton = None
-        self.sepsets = {}
-        self.dag = None
-        self.max_k = max_k
-        self.is_discrete = is_discrete
-        self.orientation_method = orientation_method
-        self.bootstrap_all_edges = bootstrap_all_edges
-        self.use_aee_alpha = use_aee_alpha
-        self.verbose = verbose
-        self._cit = None
+        # Data
+        self.data: np.ndarray = None
+        self.node_names: List[str] = []
+        self.set_data(data)
 
-        self.hiton = Hiton(
+        # Skeletons
+        self.local_skeletons: Optional[List[Set[Tuple[int, int]]]] = None
+        self.global_skeleton: Optional[List[Tuple[int, int]]] = None
+        self.sepsets: Dict[Tuple[int, int], Set[int]] = {}
+
+        # Graphs
+        self.undirected_graph: Optional[GeneralGraph] = None
+        self.dag: Optional[GeneralGraph] = None
+
+        # Parameters
+        self.conditional_independence_method: str = conditional_independence_method
+        self.num_bootstrap_samples: int = num_bootstrap_samples
+        self.max_k: int = max_k
+        self.is_discrete: bool = is_discrete
+        self.orientation_method: str = orientation_method
+        self.bootstrap_all_edges: bool = bootstrap_all_edges
+        self.use_aee_alpha: float = use_aee_alpha
+        self.verbose: bool = verbose
+        self._cit: Optional[CIT] = None
+
+        # Initialize HITON
+        self.hiton: Hiton = Hiton(
             n_vars=self.data.shape[1],
             conditional_independence_test=self.conditional_independence_test,
-            max_k=max_k,
-            verbose=verbose,
+            max_k=self.max_k,
+            verbose=self.verbose,
             multiple_comparison_correction=multiple_comparison_correction,
         )
+
+    def set_data(self, data: Union[pd.DataFrame, np.ndarray]) -> None:
+        """
+        Set the dataset to be used for causal discovery.
+        :param data: The dataset to be used (n x m), where n is samples and m is variables.
+        """
+        if isinstance(data, pd.DataFrame):
+            self.node_names: List[str] = list(data.columns)
+            self.data: np.ndarray = data.values
+        else:
+            self.node_names: List[str] = [f"X{i}" for i in range(data.shape[1])]
+            self.data: np.ndarray = data
 
     def conditional_independence_test(self, X, Y, Z=None):
         """
@@ -94,10 +118,16 @@ class BCSL:
         p_value = self._cit(X, Y, Z)
         return p_value
 
-    def learn_local_skeleton(self, directed=False):
+    def learn_local_skeleton(
+        self,
+        data: Optional[Union[pd.DataFrame, np.ndarray]] = None,
+        directed: bool = False,
+    ) -> List[Set[Tuple[int, int]]]:
         """
         Step 1: Learn the local skeleton (Markov Blanket set) for each variable using HITON.
         """
+        if data is not None:
+            self.set_data(data)
         n_vars = self.data.shape[1]
         local_skeletons = []
         if self.sepsets is None:
@@ -108,11 +138,10 @@ class BCSL:
         else:
             loop_range = range(n_vars)
         for i in loop_range:
-            mb_set, skeleton, sepsets, _ = self.hiton(
-                i
-            )  # Find the Markov Blanket set for variable i
+            # Find the Markov Blanket set for variable i
+            mb_set, skeleton, sepsets, _ = self.hiton(i)
             local_skeletons.append(skeleton)
-            self.merge_sepsets(sepsets)
+            self._merge_sepsets(sepsets)
 
         if not directed:
             local_skeletons = [
@@ -122,7 +151,7 @@ class BCSL:
         self.local_skeletons = local_skeletons
         return self.local_skeletons
 
-    def merge_sepsets(self, sepsets):
+    def _merge_sepsets(self, sepsets: Dict[Tuple[int, int], Set[int]]):
         """
         Merge the sepsets from each variable into a global sepset dictionary.
         :param sepsets: The sepsets to merge.
@@ -132,9 +161,9 @@ class BCSL:
                 self.sepsets[key] = value
             else:
                 self.sepsets[key] = self.sepsets[key].union(value)
-        self.ensure_sepset_symmetry()
+        self._ensure_sepset_symmetry()
 
-    def ensure_sepset_symmetry(self):
+    def _ensure_sepset_symmetry(self):
         """
         Ensure that the sepsets are symmetric (X, Y) -> Z and (Z, Y) -> X are the same.
         """
@@ -145,19 +174,34 @@ class BCSL:
                 self.sepsets[key[::-1]] = self.sepsets[key[::-1]].union(value)
                 self.sepsets[key] = self.sepsets[key[::-1]]
 
-    def get_bootstrap_subsamples(self):
+    def get_bootstrap_subsamples(
+        self,
+        data: Optional[Union[pd.DataFrame, np.ndarray]] = None,
+        num_bootstrap_samples: int = None,
+    ) -> List[np.ndarray]:
         """
         Generate bootstrap subsamples from the dataset for integrated learning.
         """
-        n_samples = self.data.shape[0]
+        if data is None:
+            data = self.data
+        elif isinstance(data, pd.DataFrame):
+            data = data.values
+        if num_bootstrap_samples is None:
+            num_bootstrap_samples = self.num_bootstrap_samples
+
+        n_samples = data.shape[0]
         subsamples = []
-        for _ in range(self.num_bootstrap_samples):
+        for _ in range(num_bootstrap_samples):
             indices = np.random.choice(n_samples, size=n_samples, replace=True)
-            subsample = self.data[indices, :]
+            subsample = data[indices, :]
             subsamples.append(subsample)
         return subsamples
 
-    def compute_f1_score(self, original_skeleton, learned_skeleton):
+    @staticmethod
+    def compute_f1_score(
+        original_skeleton: List[Tuple[int, int]],
+        learned_skeleton: List[Tuple[int, int]],
+    ) -> float:
         """
         Compute the F1 score between the original skeleton and the learned skeleton for each variable.
         :param original_skeleton: The original skeleton (from the original dataset).
@@ -179,24 +223,41 @@ class BCSL:
         f1_score = 2 * (precision * recall) / (precision + recall)
         return f1_score
 
-    def resolve_asymmetric_edges(self, directed=False, w=1.1, bootstrap_all_edges=None):
+    def combine_local_to_global_skeleton(
+        self,
+        directed: bool = False,
+        w: float = 1.1,
+        bootstrap_all_edges: bool = None,
+        data: Optional[Union[pd.DataFrame, np.ndarray]] = None,
+    ) -> GeneralGraph:
         """
-        Step 2: Resolve asymmetric edges using bootstrap subsamples and AEE scoring.
+        Step 2: Combine the local skeletons into a global skeleton.
+        Resolve asymmetric edges using bootstrap subsamples and AEE scoring.
 
         :param directed: Whether to consider directed edges from local skeletons (default: False).
         :param w: The weight to apply to the F1 score when resolving ties (default: 1.1).
         :param bootstrap_all_edges: Whether to bootstrap all edges (default: False).
+        :param data: The dataset to use for resolving asymmetric edges. If None, the current dataset is used.
         """
+        if data is not None:
+            print("Setting data...")
+            self.set_data(data)
+            self.local_skeletons = None
+
+        if self.local_skeletons is None:
+            print("Learning local skeletons...")
+            self.learn_local_skeleton()
+
         if bootstrap_all_edges is None:
             bootstrap_all_edges = self.bootstrap_all_edges
+
         original_skeletons = self.local_skeletons
         if original_skeletons is None:
             print(
                 "Local skeletons have not been learned yet. Learning local skeletons..."
             )
-            original_skeletons = self.learn_local_skeleton(
-                directed=directed
-            )  # Learn the original skeleton
+            # Learn the original skeleton
+            original_skeletons = self.learn_local_skeleton(directed=directed)
         subsamples = self.get_bootstrap_subsamples()  # Get bootstrap subsamples
 
         # Prepare structure to store the weight matrix for each edge
@@ -280,9 +341,8 @@ class BCSL:
                 aee_score = np.sum(score_matrix * weight_matrix)
 
             if aee_score > threshold:
-                resolved_edges.append(
-                    edge
-                )  # Keep the edge if the AEE score is positive
+                # Keep the edge if the AEE score is positive
+                resolved_edges.append(edge)
             else:
                 # Remove sepset
                 self.sepsets = {
@@ -293,13 +353,19 @@ class BCSL:
 
         # The final global skeleton after resolving asymmetric edges
         self.global_skeleton = resolved_edges
-        return self.global_skeleton
+        self.undirected_graph = get_undirected_graph_from_skeleton(
+            self.global_skeleton, self.node_names
+        )
+        return self.undirected_graph
 
-    def find_asymmetric_edges_mb(self, markov_blankets):
+    @staticmethod
+    def find_asymmetric_edges_mb(
+        markov_blankets: List[Set[int]],
+    ) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int]]]:
         """
         Identify asymmetric edges in the markov_blanket.
-        :param markov_blankets: The learned skeleton from the original dataset.
-        :return: List of asymmetric edges.
+        :param markov_blankets: List[Set[int]], the learned Markov Blankets for each variable.
+        :return: Tuple[List[Tuple[int, int]], List[Tuple[int, int]]], asymmetric and symmetric edges.
         """
         asymmetric_edges = []
         symmetric_edges = []
@@ -316,12 +382,16 @@ class BCSL:
                         symmetric_edges.append(symmetric_edge)
         return asymmetric_edges, symmetric_edges
 
-    def find_asymmetric_edges(self, skeletons, directed=False):
+    def find_asymmetric_edges(
+        self, skeletons: List[Set[Tuple[int, int]]], directed=False
+    ) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int]]]:
         """
-        Identify asymmetric edges in the skeleton.
-        :param skeletons: The learned skeleton from the original dataset.
+        Identify asymmetric edges in the skeletons.
+        Asymmetric edges are those that are present in one skeleton but not the other.
+
+        :param skeletons: List[Set[Tuple[int, int]]], the learned skeletons from the original dataset.
         :param directed: Whether to consider directed edges (default: False).
-        :return: List of asymmetric edges.
+        :return: Tuple[List[Tuple[int, int]], List[Tuple[int, int]]], asymmetric and symmetric edges.
         """
         asymmetric_edges = []
         symmetric_edges = []
@@ -343,23 +413,39 @@ class BCSL:
         symmetric_edges = list(set(symmetric_edges))
         return asymmetric_edges, symmetric_edges
 
-    def make_edges_undirected(self, edges):
+    @staticmethod
+    def make_edges_undirected(
+        edge_list: List[Tuple[int, int]]
+    ) -> List[Tuple[int, int]]:
         """
         Make the edges undirected by sorting each edge.
-        :param edges: The list of edges to make undirected.
-        :return: List of undirected edges.
+        :param edge_list: List[Tuple[int, int]], the list of edges in the graph.
+        :return: List[Tuple[int, int]], the undirected edges.
         """
-        return list(set([tuple(sorted(edge)) for edge in edges]))
+        return list(set([tuple(sorted(edge)) for edge in edge_list]))
 
-    def orient_edges(self, method=None, independence_test_method="kci"):
+    def orient_edges(
+        self,
+        method: str = None,
+        independence_test_method: str = "kci",
+        data: Union[pd.DataFrame, np.ndarray] = None,
+    ) -> GeneralGraph:
         """
         Step 3: Orient the edges in the global skeleton.
         """
+        if data is not None:
+            print("Setting data...")
+            self.set_data(data)
+            print("Resetting skeletons...")
+            self.local_skeletons = None
+            self.global_skeleton = None
+
         if self.global_skeleton is None:
             print(
                 "Global skeleton has not been learned or resolved yet. Learning global skeleton..."
             )
-            self.global_skeleton = self.resolve_asymmetric_edges()
+            self.combine_local_to_global_skeleton()
+
         if method is None:
             method = self.orientation_method
         if method == "hill_climbing":
@@ -373,68 +459,83 @@ class BCSL:
         else:
             raise ValueError(f"Unknown orientation method: {method}")
 
-    def orient_edges_hill_climbing(self):
+    def orient_edges_hill_climbing(
+        self,
+        data: Union[pd.DataFrame, np.ndarray] = None,
+        global_skeleton: List[Tuple[int, int]] = None,
+        undirected_graph: GeneralGraph = None,
+    ):
         """
         Orient the edges in the global skeleton using BDeu or Gaussian BIC and hill-climbing.
         :return:  The final directed acyclic graph (DAG).
         """
-        if self.global_skeleton is None:
-            raise ValueError("Global skeleton has not been learned or resolved yet.")
+        node_names = self.node_names
+        if data is None:
+            data = self.data
+        else:
+            node_names = list(data.columns)
+        if global_skeleton is not None and undirected_graph is not None:
+            raise ValueError("Both global skeleton and undirected graph are provided!")
+        if undirected_graph is not None:
+            global_skeleton = get_edge_list_from_graph(undirected_graph)
+        if global_skeleton is None:
+            if self.global_skeleton is None:
+                raise ValueError("Global skeleton is required for FCI algorithm!")
+            global_skeleton = self.global_skeleton
 
         # Initialize the BDeu score function
         if self.is_discrete:
-            score_function = BDeuScore(self.data, ess=1.0, use_causal_learn=True)
+            score_function = BDeuScore(data, ess=1.0, use_causal_learn=True)
         else:
-            score_function = GaussianBICScore(self.data)
+            score_function = GaussianBICScore(data)
 
         # Initialize hill-climbing with the global skeleton and BDeu scoring
         hill_climber = HillClimber(
-            score_function, self.get_neighbors, node_names=self.node_names
+            score_function, self.get_neighbors, node_names=node_names
         )
         self.dag = hill_climber.run(
-            self.global_skeleton
+            global_skeleton
         )  # Run hill-climbing to orient edges
 
         return self.dag
 
     def orient_edges_fci(
         self,
-        max_path_length: int = -1,
-        depth: int = -1,
-        independence_test_method="kci",
-        alpha=0.05,
-        verbose=False,
-        background_knowledge=None,
+        data: Union[pd.DataFrame, np.ndarray] = None,
+        global_skeleton: List[Tuple[int, int]] = None,
+        undirected_graph: GeneralGraph = None,
+        sepsets: Dict[Tuple[int, int], Set[int]] = None,
+        independence_test_method: str = "kci",
+        alpha: float = 0.05,
+        max_path_length: int = 3,
+        verbose: bool = False,
+        background_knowledge: Optional[BackgroundKnowledge] = None,
         **kwargs,
-    ):
+    ) -> Tuple[GeneralGraph, List[Tuple[int, int]]]:
         """
         Orient the edges in the global skeleton using FCI algorithm from causal-learn.
         Perform Fast Causal Inference (FCI) algorithm for causal discovery
 
         Parameters
         ----------
-        dataset: data set (numpy ndarray), shape (n_samples, n_features). The input data, where n_samples is the number of
-                samples and n_features is the number of features.
-        independence_test_method: str, name of the function of the independence test being used
-                [fisherz, chisq, gsq, kci]
-               - fisherz: Fisher's Z conditional independence test
-               - chisq: Chi-squared conditional independence test
-               - gsq: G-squared conditional independence test
-               - kci: Kernel-based conditional independence test
-        alpha: float, desired significance level of independence tests (p_value) in (0,1)
-        depth: The depth for the fast adjacency search, or -1 if unlimited
-        max_path_length: the maximum length of any discriminating path, or -1 if unlimited.
-        verbose: True is verbose output should be printed or logged
-        background_knowledge: background knowledge
+        data: Union[pd.DataFrame, np.ndarray], the dataset to be used (n x m), where n is samples and m is variables.
+        global_skeleton: List[Tuple[int, int]], the global skeleton (list of edges).
+        undirected_graph: GeneralGraph, the undirected graph.
+        sepsets: Dict[Tuple[int, int], Set[int]], the sepsets for each edge.
+        independence_test_method: str, the method to use for conditional independence tests.
+        alpha: float, the significance level for independence tests.
+        max_path_length: int, the maximum length of any discriminating path.
+        verbose: bool, whether to print verbose output.
+        background_knowledge: BackgroundKnowledge, background knowledge for the FCI algorithm.
+        kwargs: Additional keyword arguments for the CIT method.
 
         Returns
         -------
-        graph : a GeneralGraph object, where graph.graph[j,i]=1 and graph.graph[i,j]=-1 indicates  i --> j ,
+        graph: a GeneralGraph object, where graph.graph[j,i]=1 and graph.graph[i,j]=-1 indicates  i --> j ,
                         graph.graph[i,j] = graph.graph[j,i] = -1 indicates i --- j,
                         graph.graph[i,j] = graph.graph[j,i] = 1 indicates i <-> j,
                         graph.graph[j,i]=1 and graph.graph[i,j]=2 indicates  i o-> j.
-        edges : list
-            Contains graph's edges properties.
+        edges : List[Edge], Contains graph's edges properties.
             If edge.properties have the Property 'nl', then there is no latent confounder. Otherwise,
                 there are possibly latent confounders.
             If edge.properties have the Property 'dd', then it is definitely direct. Otherwise,
@@ -448,31 +549,48 @@ class BCSL:
         # if dataset.shape[0] < dataset.shape[1]:
         #     warnings.warn("The number of features is much larger than the sample size!")
         #
-        independence_test_method = CIT(
-            self.data, method=independence_test_method, **kwargs
-        )
+        node_names = self.node_names
+        if data is None:
+            data = self.data
+        else:
+            if isinstance(data, pd.DataFrame):
+                node_names = list(data.columns)
+            else:
+                node_names = [f"X{i}" for i in range(data.shape[1])]
 
-        if (depth is None) or type(depth) != int:
-            raise TypeError("'depth' must be 'int' type!")
-        if (background_knowledge is not None) and type(
-            background_knowledge
-        ) != BackgroundKnowledge:
+        if global_skeleton is not None and undirected_graph is not None:
+            raise ValueError("Both global skeleton and undirected graph are provided!")
+
+        if undirected_graph is None:
+            if global_skeleton is None:
+                if self.global_skeleton is None:
+                    raise ValueError("Global skeleton is required for FCI algorithm!")
+                global_skeleton = self.global_skeleton
+            undirected_graph = get_undirected_graph_from_skeleton(
+                global_skeleton, node_names=node_names
+            )
+        elif not isinstance(undirected_graph, GeneralGraph):
+            raise TypeError("'undirected_graph' must be a GeneralGraph object!")
+
+        if sepsets is None:
+            if self.sepsets is None:
+                raise ValueError("Sepsets are required for FCI algorithm!")
+            sepsets = self.sepsets
+
+        if background_knowledge is not None and not isinstance(
+            background_knowledge, BackgroundKnowledge
+        ):
             raise TypeError(
                 "'background_knowledge' must be 'BackgroundKnowledge' type!"
             )
-        if type(max_path_length) != int:
-            raise TypeError("'max_path_length' must be 'int' type!")
 
-        graph = get_undirected_graph_from_skeleton(
-            skeleton=self.global_skeleton, node_names=self.node_names
-        )
-        nodes = graph.nodes
+        nodes = undirected_graph.nodes
 
         graph, edges = fci_orient_edges_from_graph_node_sepsets(
-            data=self.data,
-            graph=graph,
+            data=data,
+            graph=undirected_graph,
             nodes=nodes,
-            sepsets=self.sepsets,
+            sepsets=sepsets,
             background_knowledge=background_knowledge,
             independence_test_method=independence_test_method,
             alpha=alpha,
@@ -482,16 +600,17 @@ class BCSL:
 
         return graph, edges
 
-    def get_neighbors(self, graph):
+    @staticmethod
+    def get_neighbors(edge_list):
         """
         Generate neighbor graphs by changing the orientation of one edge at a time.
-        :param graph: The current graph structure.
+        :param edge_list: List[Tuple[int, int]], the list of edges in the graph.
         :return: A list of neighboring graphs.
         """
-        graph = set(graph)  # Convert to set for faster edge lookup
+        edge_list = set(edge_list)  # Convert to set for faster edge lookup
         neighbors = []
-        for edge in graph:
-            neighbor = graph.copy()
+        for edge in edge_list:
+            neighbor = edge_list.copy()
             # Flip edge orientation (X -> Y becomes Y -> X)
             X, Y = edge
             neighbor.remove(edge)

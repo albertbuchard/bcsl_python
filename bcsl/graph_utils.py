@@ -5,6 +5,7 @@ import networkx as nx
 from causallearn.graph.Edge import Edge
 from causallearn.graph.Endpoint import Endpoint
 from causallearn.graph.GeneralGraph import GeneralGraph
+from causallearn.graph.Graph import Graph
 from causallearn.graph.GraphNode import GraphNode
 from causallearn.graph.Node import Node
 from causallearn.utils.GraphUtils import GraphUtils
@@ -42,6 +43,15 @@ def get_undirected_graph_from_skeleton(skeleton, node_names):
         graph.add_edge(Edge(nodes[X], nodes[Y], Endpoint.CIRCLE, Endpoint.CIRCLE))
 
     return graph
+
+
+def get_edge_list_from_graph(graph: GeneralGraph):
+    edges: List[Edge] = graph.get_graph_edges()
+
+    def idx_tuple(edge):
+        return graph.node_map[edge.node1], graph.node_map[edge.node2]
+
+    return [idx_tuple(edge) for edge in edges]
 
 
 def visualize_graph(graph, labels=None, title=None, output_path=None, show=True):

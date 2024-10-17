@@ -14,6 +14,7 @@ def compare_easy_dataset(
     conditional_independence_method="kci",
     bootstrap_all_edges=True,
     multiple_comparison_correction=None,
+    max_k=3,
 ):
     # Generate synthetic data for testing
     np.random.seed(43)
@@ -49,6 +50,7 @@ def compare_easy_dataset(
     plot_all_methods(
         data,
         num_bootstrap_samples,
+        max_k=3,
         conditional_independence_method=conditional_independence_method,
         bootstrap_all_edges=bootstrap_all_edges,
         multiple_comparison_correction=multiple_comparison_correction,

@@ -33,13 +33,12 @@ def plot_all_methods(
     # Step 2: Resolve asymmetric edges using bootstrap
     start_time = time.time()
     print("Resolving Asymmetric Edges...")
-    global_skeleton = bcsl.resolve_asymmetric_edges(
+    undirected_graph = bcsl.combine_local_to_global_skeleton(
         bootstrap_all_edges=bootstrap_all_edges
     )
-    print("Global Skeleton (resolved):", global_skeleton)
+    print("Global Skeleton (resolved):", bcsl.global_skeleton)
     print("Time taken:", time.time() - start_time)
-    graph_skeleton = get_undirected_graph_from_skeleton(global_skeleton, data.columns)
-    visualize_graph(graph_skeleton, title="BCSL Global Skeleton", show=True)
+    visualize_graph(undirected_graph, title="BCSL Global Skeleton", show=True)
 
     # Step 3a: Orient edges using BDeu and hill-climbing
     start_time = time.time()

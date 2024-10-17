@@ -11,6 +11,7 @@ if __name__ == "__main__":
         "conditional_independence_method": "fisherz",
         "bootstrap_all_edges": True,
         "multiple_comparison_correction": "bonferroni",  # "fdr" or "bonferroni"
+        "max_k": 3,
     }
     compare_easy_dataset(**params)
     compare_hard_dataset(**params)
