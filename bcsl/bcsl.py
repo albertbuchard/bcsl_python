@@ -273,7 +273,10 @@ class BCSL:
         if not asymmetric_edges:
             print("No asymmetric edges found. Returning the global skeleton...")
             self.global_skeleton = symmetric_edges
-            return self.global_skeleton
+            self.undirected_graph = get_undirected_graph_from_skeleton(
+                self.global_skeleton, self.node_names
+            )
+            return self.undirected_graph
 
         weight_matrices = {
             edge: np.zeros((2, self.num_bootstrap_samples)) for edge in asymmetric_edges
