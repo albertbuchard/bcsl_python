@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="bcsl_python",
-    version="0.7.0",
+    version="0.8.0",
     author="Guo, Xianjie",
     author_email="albert.buchard@gmail.com",
     description="Bootstrap-based Causal Structure Learning",
