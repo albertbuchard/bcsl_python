@@ -49,7 +49,7 @@ class BCSL:
         :param multiple_comparison_correction: The method to use for multiple comparison correction. Options are: 'bonferroni', 'fdr'.
         :param verbose: Whether to print verbose output.
         """
-        # Data
+        # Assign parameters
         self.data: np.ndarray = None
         self.node_names: List[str] = []
         self.set_data(data)
@@ -72,7 +72,13 @@ class BCSL:
         self.bootstrap_all_edges: bool = bootstrap_all_edges
         self.use_aee_alpha: float = use_aee_alpha
         self.verbose: bool = verbose
+        self.multiple_comparison_correction: Optional[str] = (
+            multiple_comparison_correction
+        )
         self._cit: Optional[CIT] = None
+
+        # Validate parameters
+        self.validate_parameters()
 
         # Initialize HITON
         self.hiton: Hiton = Hiton(
@@ -80,8 +86,106 @@ class BCSL:
             conditional_independence_test=self.conditional_independence_test,
             max_k=self.max_k,
             verbose=self.verbose,
-            multiple_comparison_correction=multiple_comparison_correction,
+            multiple_comparison_correction=self.multiple_comparison_correction,
         )
+
+    def validate_parameters(self) -> None:
+        """
+        Validate the initialization parameters.
+        Raises:
+            ValueError: If any of the parameters are invalid.
+            TypeError: If any of the parameters have incorrect types.
+        """
+        # Validate data
+        if not isinstance(self.data, (pd.DataFrame, np.ndarray)):
+            raise TypeError(
+                f"data must be a pandas DataFrame or numpy ndarray, got {type(self.data)}."
+            )
+        if isinstance(self.data, pd.DataFrame):
+            if self.data.empty:
+                raise ValueError("data DataFrame is empty.")
+            self.node_names = list(self.data.columns)
+            self.data = self.data.values
+        elif isinstance(self.data, np.ndarray):
+            if self.data.size == 0:
+                raise ValueError("data ndarray is empty.")
+            if self.data.ndim != 2:
+                raise ValueError(
+                    f"data must be a 2D array, got {self.data.ndim}D array."
+                )
+
+        # Validate num_bootstrap_samples
+        if not isinstance(self.num_bootstrap_samples, int):
+            raise TypeError(
+                f"num_bootstrap_samples must be an integer, got {type(self.num_bootstrap_samples)}."
+            )
+        if self.num_bootstrap_samples <= 0:
+            raise ValueError("num_bootstrap_samples must be a positive integer.")
+
+        # Validate max_k
+        if not isinstance(self.max_k, int):
+            raise TypeError(f"max_k must be an integer, got {type(self.max_k)}.")
+        if self.max_k < 0:
+            raise ValueError("max_k must be a non-negative integer.")
+
+        # Validate is_discrete
+        if not isinstance(self.is_discrete, bool):
+            raise TypeError(
+                f"is_discrete must be a boolean, got {type(self.is_discrete)}."
+            )
+
+        # Validate orientation_method
+        valid_orientation_methods = {"hill_climbing", "fci"}
+        if not isinstance(self.orientation_method, str):
+            raise TypeError(
+                f"orientation_method must be a string, got {type(self.orientation_method)}."
+            )
+        if self.orientation_method not in valid_orientation_methods:
+            raise ValueError(
+                f"orientation_method must be one of {valid_orientation_methods}, got '{self.orientation_method}'."
+            )
+
+        # Validate conditional_independence_method
+        valid_ci_methods = {
+            "fisherz",
+            "gsq",
+            "mi",
+            "g2",
+            # Add other valid methods from causal-learn as needed
+        }
+        if not isinstance(self.conditional_independence_method, str):
+            raise TypeError(
+                f"conditional_independence_method must be a string, got {type(self.conditional_independence_method)}."
+            )
+        if self.conditional_independence_method not in valid_ci_methods:
+            raise ValueError(
+                f"conditional_independence_method must be one of {valid_ci_methods}, got '{self.conditional_independence_method}'."
+            )
+
+        # Validate bootstrap_all_edges
+        if not isinstance(self.bootstrap_all_edges, bool):
+            raise TypeError(
+                f"bootstrap_all_edges must be a boolean, got {type(self.bootstrap_all_edges)}."
+            )
+
+        # Validate use_aee_alpha
+        if not isinstance(self.use_aee_alpha, float):
+            raise TypeError(
+                f"use_aee_alpha must be a float, got {type(self.use_aee_alpha)}."
+            )
+        if not (0.0 < self.use_aee_alpha < 1.0):
+            raise ValueError("use_aee_alpha must be between 0 and 1.")
+
+        # Validate multiple_comparison_correction
+        valid_corrections = {None, "bonferroni", "fdr"}
+        if self.multiple_comparison_correction not in valid_corrections:
+            raise ValueError(
+                f"multiple_comparison_correction must be one of {valid_corrections}, got '{self.multiple_comparison_correction}'."
+            )
+
+        # Validate verbose
+        if not isinstance(self.verbose, bool):
+            raise TypeError(f"verbose must be a boolean, got {type(self.verbose)}.")
 
     def set_data(self, data: Union[pd.DataFrame, np.ndarray]) -> None:
         """
